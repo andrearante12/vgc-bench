@@ -23,6 +23,76 @@ IV_MAX: int = 31
 
 # Pokémon that count toward the "Limit N Restricted" rule in VGC formats.
 # Covers all restricted legendaries introduced through Gen 9.
+# ---------------------------------------------------------------------------
+# Species Clause grouping
+# ---------------------------------------------------------------------------
+# Maps variant/form species names → the canonical name used for Species Clause
+# checking.  Any two species that map to the same key cannot coexist on a team.
+#
+# Regional variants (-Alola, -Galar, -Hisui, -Paldean) are intentionally kept
+# separate because they are treated as distinct Pokémon in competitive play and
+# Showdown does not group them under the same clause key.
+#
+# Gender forms (e.g. Indeedee / Indeedee-F) are also kept separate because
+# competitive teams regularly run both and Showdown accepts them as a pair.
+_SPECIES_CLAUSE_GROUPS: dict[str, str] = {
+    # Ogerpon mask forms (dex #1017)
+    "Ogerpon-Cornerstone": "Ogerpon",
+    "Ogerpon-Hearthflame": "Ogerpon",
+    "Ogerpon-Wellspring":  "Ogerpon",
+    # Calyrex fusions (dex #898)
+    "Calyrex-Ice":    "Calyrex",
+    "Calyrex-Shadow": "Calyrex",
+    # Urshifu styles (dex #892)
+    "Urshifu-Rapid-Strike": "Urshifu",
+    # Zacian (dex #888)
+    "Zacian-Crowned": "Zacian",
+    # Zamazenta (dex #889)
+    "Zamazenta-Crowned": "Zamazenta",
+    # Dialga (dex #483)
+    "Dialga-Origin": "Dialga",
+    # Giratina (dex #487)
+    "Giratina-Origin": "Giratina",
+    # Necrozma fusions (dex #800)
+    "Necrozma-Dusk-Mane":  "Necrozma",
+    "Necrozma-Dawn-Wings": "Necrozma",
+    "Necrozma-Ultra":      "Necrozma",
+    # Kyurem fusions (dex #646)
+    "Kyurem-Black": "Kyurem",
+    "Kyurem-White": "Kyurem",
+    # Ursaluna (dex #901)
+    "Ursaluna-Bloodmoon": "Ursaluna",
+    # Terapagos (dex #1024)
+    "Terapagos-Terastal": "Terapagos",
+    "Terapagos-Stellar":  "Terapagos",
+    # Landorus (dex #645)
+    "Landorus-Therian": "Landorus",
+    # Tatsugiri forms (dex #978)
+    "Tatsugiri-Droopy":    "Tatsugiri",
+    "Tatsugiri-Stretchy":  "Tatsugiri",
+    # Sinistcha forms (dex #1013)
+    "Sinistcha-Masterpiece": "Sinistcha",
+    # Gastrodon (dex #423)
+    "Gastrodon-East": "Gastrodon",
+    # Rotom forms (dex #479)
+    "Rotom-Heat":  "Rotom",
+    "Rotom-Wash":  "Rotom",
+    "Rotom-Frost": "Rotom",
+    "Rotom-Fan":   "Rotom",
+    "Rotom-Mow":   "Rotom",
+}
+
+
+def species_clause_key(species: str) -> str:
+    """Return the Species Clause key for a species name.
+
+    Two species that return the same key cannot coexist on the same team.
+    For most species this is the species name itself; for form variants it
+    is the canonical base-species name (e.g. "Ogerpon-Wellspring" → "Ogerpon").
+    """
+    return _SPECIES_CLAUSE_GROUPS.get(species, species)
+
+
 RESTRICTED_LEGENDARIES: frozenset[str] = frozenset({
     # Gen 1
     "Mewtwo",

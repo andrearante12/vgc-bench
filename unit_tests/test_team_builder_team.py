@@ -45,8 +45,34 @@ class TestCandidateTeam:
     def test_duplicate_species_raises(self, space):
         rng = random.Random(0)
         b = space.random_build(rng=rng)
-        with pytest.raises(ValueError, match="duplicate"):
+        with pytest.raises(ValueError, match="species clause"):
             CandidateTeam(members=(b, b, b, b, b, b))
+
+    def test_ogerpon_form_variants_raise_species_clause(self, space):
+        """Two different Ogerpon forms must not coexist — they share the same dex number."""
+        from vgc_bench.team_builder.pokemon_build import PokemonBuild
+        ogerpon_forms = [s for s in space.species_list if s.startswith("Ogerpon")]
+        if len(ogerpon_forms) < 2:
+            pytest.skip("fewer than 2 Ogerpon forms in corpus")
+        rng = random.Random(0)
+        builds = [space.random_build(species=f, rng=rng) for f in ogerpon_forms[:2]]
+        # Fill remaining 4 slots with non-Ogerpon species
+        others = [
+            space.random_build(species=s, rng=rng)
+            for s in space.species_list
+            if not s.startswith("Ogerpon")
+        ]
+        # Deduplicate items
+        used_items = {builds[0].item, builds[1].item}
+        filler = []
+        for b in others:
+            if b.item not in used_items and len(filler) < 4:
+                filler.append(b)
+                used_items.add(b.item)
+        if len(filler) < 4:
+            pytest.skip("not enough filler species with distinct items")
+        with pytest.raises(ValueError, match="species clause"):
+            CandidateTeam(members=tuple(builds + filler))
 
     def test_with_win_rate_is_nonmutating(self, space):
         t = _make_team(space)

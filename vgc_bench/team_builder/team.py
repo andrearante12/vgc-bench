@@ -15,7 +15,7 @@ from poke_env.teambuilder import Teambuilder
 
 from vgc_bench.src.teams import calc_team_similarity_score
 from vgc_bench.team_builder.build_space import BuildSpace
-from vgc_bench.team_builder.pokemon_build import EV_MAX_PER_STAT, PokemonBuild
+from vgc_bench.team_builder.pokemon_build import EV_MAX_PER_STAT, PokemonBuild, species_clause_key
 
 TEAM_SIZE: int = 6
 
@@ -50,10 +50,16 @@ class CandidateTeam:
             raise ValueError(
                 f"a team must have exactly {TEAM_SIZE} members, got {len(self.members)}"
             )
-        species = [m.species for m in self.members]
-        dup_species = [s for s in species if species.count(s) > 1]
-        if dup_species:
-            raise ValueError(f"duplicate species in team: {list(set(dup_species))}")
+        # Species Clause — checked by clause key so that form variants of the same
+        # base species (e.g. Ogerpon-Wellspring and Ogerpon-Hearthflame) are caught.
+        clause_keys = [species_clause_key(m.species) for m in self.members]
+        dup_keys = [k for k in clause_keys if clause_keys.count(k) > 1]
+        if dup_keys:
+            offending = [
+                m.species for m in self.members
+                if species_clause_key(m.species) in dup_keys
+            ]
+            raise ValueError(f"species clause violation in team: {list(set(offending))}")
         items = [m.item for m in self.members]
         dup_items = [i for i in items if items.count(i) > 1]
         if dup_items:
@@ -134,7 +140,7 @@ def random_team(
         A new CandidateTeam with win_rate=None.
     """
     _rng = rng or random
-    used_species: set[str] = set()
+    used_clause_keys: set[str] = set()  # Species Clause — tracks form-group keys
     used_items: set[str] = set()
     members: list[PokemonBuild] = []
     available = space.species_order(_rng)
@@ -146,7 +152,8 @@ def random_team(
     for species in available:
         if len(members) == TEAM_SIZE:
             break
-        if species in used_species:
+        clause_key = species_clause_key(species)
+        if clause_key in used_clause_keys:
             continue
         # Enforce restricted legendary limit (0 = no restriction)
         if (
@@ -160,7 +167,7 @@ def random_team(
             # Species has only one item in corpus and it's already used; skip
             continue
         members.append(build)
-        used_species.add(species)
+        used_clause_keys.add(clause_key)
         used_items.add(build.item)
         if species in restricted_species_set:
             restricted_count += 1
@@ -200,36 +207,50 @@ def swap_member(
     swap_slots = slots[:n_swaps]
     swap_slot_set = set(swap_slots)
 
-    current_species = {m.species for m in members}
+    # Track clause keys (not raw species names) for Species Clause enforcement
+    current_clause_keys = {species_clause_key(m.species) for m in members}
     # Items held by slots that are NOT being swapped are fixed constraints
     used_items = {members[i].item for i in range(TEAM_SIZE) if i not in swap_slot_set}
 
     restricted_limit: int = space.restricted_limit
     restricted_species_set: frozenset[str] = space.restricted_species
+    # Clause keys that belong to restricted species (pre-computed)
+    restricted_clause_keys: set[str] = {
+        species_clause_key(s) for s in restricted_species_set
+    }
+    # Restricted clause keys currently in the team
+    current_restricted_keys = {
+        k for k in current_clause_keys if k in restricted_clause_keys
+    }
 
     for slot in swap_slots:
         evicted_species = members[slot].species
-        current_species.discard(evicted_species)
+        evicted_key = species_clause_key(evicted_species)
+        current_clause_keys.discard(evicted_key)
+        current_restricted_keys.discard(evicted_key)
 
-        # Count restricted Pokémon already committed (everything in current_species
-        # after discarding the evicted slot).
-        current_restricted = sum(1 for s in current_species if s in restricted_species_set)
+        current_restricted = len(current_restricted_keys)
 
         all_ordered = space.species_order(_rng)
         if restricted_limit > 0:
             species_candidates = [
                 s for s in all_ordered
-                if s not in current_species
+                if species_clause_key(s) not in current_clause_keys
                 and (
                     s not in restricted_species_set
                     or current_restricted < restricted_limit
                 )
             ]
             if not species_candidates:
-                # Corpus too small to satisfy restricted limit — relax constraint
-                species_candidates = [s for s in all_ordered if s not in current_species]
+                species_candidates = [
+                    s for s in all_ordered
+                    if species_clause_key(s) not in current_clause_keys
+                ]
         else:
-            species_candidates = [s for s in all_ordered if s not in current_species]
+            species_candidates = [
+                s for s in all_ordered
+                if species_clause_key(s) not in current_clause_keys
+            ]
 
         if not species_candidates:
             raise ValueError(
@@ -249,7 +270,10 @@ def swap_member(
                 species=species_candidates[0], rng=_rng
             )
         members[slot] = new_build
-        current_species.add(new_build.species)
+        new_key = species_clause_key(new_build.species)
+        current_clause_keys.add(new_key)
+        if new_key in restricted_clause_keys:
+            current_restricted_keys.add(new_key)
         used_items.add(new_build.item)
 
     return CandidateTeam(members=tuple(members))
@@ -358,60 +382,64 @@ def combine_teams(
     """
     _rng = rng or random
     result: list[PokemonBuild] = []
-    used_species: set[str] = set()
+    used_clause_keys: set[str] = set()  # Species Clause tracking
     used_items: set[str] = set()
 
     restricted_limit: int = space.restricted_limit
     restricted_species_set: frozenset[str] = space.restricted_species
+    restricted_clause_keys: set[str] = {
+        species_clause_key(s) for s in restricted_species_set
+    }
     restricted_count: int = 0
 
-    def _restricted_ok(species: str) -> bool:
-        """Return True if adding this species respects the restricted limit."""
-        if restricted_limit <= 0 or species not in restricted_species_set:
-            return True
-        return restricted_count < restricted_limit
+    def _ok(species: str) -> bool:
+        """Return True if adding this species passes Species Clause and restricted limit."""
+        if species_clause_key(species) in used_clause_keys:
+            return False
+        if restricted_limit > 0 and species in restricted_species_set:
+            return restricted_count < restricted_limit
+        return True
+
+    def _record(build: PokemonBuild) -> None:
+        """Register a placed build in tracking sets."""
+        nonlocal restricted_count
+        key = species_clause_key(build.species)
+        used_clause_keys.add(key)
+        used_items.add(build.item)
+        if key in restricted_clause_keys:
+            restricted_count += 1
 
     for a, b in zip(team_a.members, team_b.members):
         chosen, fallback = (a, b) if _rng.random() < 0.5 else (b, a)
         placed = False
         # Try each parent candidate; accept if no species or item conflict
         for candidate in (chosen, fallback):
-            if (
-                candidate.species not in used_species
-                and candidate.item not in used_items
-                and _restricted_ok(candidate.species)
-            ):
+            if _ok(candidate.species) and candidate.item not in used_items:
                 result.append(candidate)
-                used_species.add(candidate.species)
-                used_items.add(candidate.item)
-                if candidate.species in restricted_species_set:
-                    restricted_count += 1
+                _record(candidate)
                 placed = True
                 break
         if not placed:
             # Try parents again, accepting item conflict (re-roll item only)
             for candidate in (chosen, fallback):
-                if candidate.species not in used_species and _restricted_ok(candidate.species):
+                if _ok(candidate.species):
                     new_build = space.random_build(
                         species=candidate.species, rng=_rng, forbidden_items=used_items
                     )
                     if new_build.item not in used_items:
                         result.append(new_build)
-                        used_species.add(new_build.species)
-                        used_items.add(new_build.item)
-                        if new_build.species in restricted_species_set:
-                            restricted_count += 1
+                        _record(new_build)
                         placed = True
                         break
         if not placed:
-            # Both parent species conflict or restricted limit reached; scan fresh species
-            options = [
-                s for s in space.species_list
-                if s not in used_species and _restricted_ok(s)
-            ]
+            # Both parent species conflict; scan fresh species
+            options = [s for s in space.species_list if _ok(s)]
             if not options:
                 # Relax restricted limit as a last resort (shouldn't happen normally)
-                options = [s for s in space.species_list if s not in used_species]
+                options = [
+                    s for s in space.species_list
+                    if species_clause_key(s) not in used_clause_keys
+                ]
             if not options:
                 raise ValueError(
                     "build space too small to resolve species conflict in combine_teams"
@@ -428,9 +456,6 @@ def combine_teams(
                 # All options have item conflicts; pick first and relax item clause
                 new_build = space.random_build(species=options[0], rng=_rng)
             result.append(new_build)
-            used_species.add(new_build.species)
-            used_items.add(new_build.item)
-            if new_build.species in restricted_species_set:
-                restricted_count += 1
+            _record(new_build)
 
     return CandidateTeam(members=tuple(result))
