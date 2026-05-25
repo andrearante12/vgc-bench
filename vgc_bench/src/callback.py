@@ -131,7 +131,7 @@ class Callback(BaseCallback):
         if self.evaluate:
             self.eval_agent = BatchPolicyPlayer(
                 server_configuration=ServerConfiguration(
-                    f"ws://localhost:{port}/showdown/websocket",
+                    f"ws://127.0.0.1:{port}/showdown/websocket",
                     "https://play.pokemonshowdown.com/action.php?",
                 ),
                 battle_format=battle_format,
@@ -143,7 +143,7 @@ class Callback(BaseCallback):
             )
             self.eval_agent2 = BatchPolicyPlayer(
                 server_configuration=ServerConfiguration(
-                    f"ws://localhost:{port}/showdown/websocket",
+                    f"ws://127.0.0.1:{port}/showdown/websocket",
                     "https://play.pokemonshowdown.com/action.php?",
                 ),
                 battle_format=battle_format,
@@ -155,7 +155,7 @@ class Callback(BaseCallback):
             )
             self.eval_opponent = SimpleHeuristicsPlayer(
                 server_configuration=ServerConfiguration(
-                    f"ws://localhost:{port}/showdown/websocket",
+                    f"ws://127.0.0.1:{port}/showdown/websocket",
                     "https://play.pokemonshowdown.com/action.php?",
                 ),
                 battle_format=battle_format,
@@ -168,7 +168,7 @@ class Callback(BaseCallback):
             self.eval_opponent2 = BatchPolicyPlayer(
                 deterministic=True,
                 server_configuration=ServerConfiguration(
-                    f"ws://localhost:{port}/showdown/websocket",
+                    f"ws://127.0.0.1:{port}/showdown/websocket",
                     "https://play.pokemonshowdown.com/action.php?",
                 ),
                 battle_format=battle_format,

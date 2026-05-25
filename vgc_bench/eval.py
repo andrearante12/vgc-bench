@@ -58,7 +58,7 @@ def cross_eval_all_agents(
         players = [
             cls_(
                 server_configuration=ServerConfiguration(
-                    f"ws://localhost:{port}/showdown/websocket",
+                    f"ws://127.0.0.1:{port}/showdown/websocket",
                     "https://play.pokemonshowdown.com/action.php?",
                 ),
                 battle_format=battle_format,
@@ -73,7 +73,7 @@ def cross_eval_all_agents(
         llm_player = LLMPlayer(
             device=device,
             server_configuration=ServerConfiguration(
-                f"ws://localhost:{port}/showdown/websocket",
+                f"ws://127.0.0.1:{port}/showdown/websocket",
                 "https://play.pokemonshowdown.com/action.php?",
             ),
             battle_format=battle_format,
@@ -92,7 +92,7 @@ def cross_eval_all_agents(
                     f"{run_id}/{method}/{checkpoint}", None
                 ),
                 server_configuration=ServerConfiguration(
-                    f"ws://localhost:{port}/showdown/websocket",
+                    f"ws://127.0.0.1:{port}/showdown/websocket",
                     "https://play.pokemonshowdown.com/action.php?",
                 ),
                 battle_format=battle_format,
@@ -182,7 +182,7 @@ async def get_best_checkpoints(
     best_checkpoints = {}
     save_policy = BatchPolicyPlayer(
         server_configuration=ServerConfiguration(
-            f"ws://localhost:{port}/showdown/websocket",
+            f"ws://127.0.0.1:{port}/showdown/websocket",
             "https://play.pokemonshowdown.com/action.php?",
         ),
         battle_format=battle_format,
@@ -194,7 +194,7 @@ async def get_best_checkpoints(
     )
     opponent = BatchPolicyPlayer(
         server_configuration=ServerConfiguration(
-            f"ws://localhost:{port}/showdown/websocket",
+            f"ws://127.0.0.1:{port}/showdown/websocket",
             "https://play.pokemonshowdown.com/action.php?",
         ),
         battle_format=battle_format,
@@ -316,7 +316,7 @@ def cross_eval_over_team_sizes(
                     f"{run_id}/{method}/{num_teams}_teams"
                 ),
                 server_configuration=ServerConfiguration(
-                    f"ws://localhost:{port}/showdown/websocket",
+                    f"ws://127.0.0.1:{port}/showdown/websocket",
                     "https://play.pokemonshowdown.com/action.php?",
                 ),
                 battle_format=battle_format,
