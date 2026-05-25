@@ -40,13 +40,13 @@ class TestPokemonBuildConstruction:
         with pytest.raises(ValueError, match="duplicate"):
             _make(moves=("Heat Wave", "Heat Wave", "Air Slash", "Protect"))
 
-    def test_ev_over_32_raises(self):
-        with pytest.raises(ValueError, match="0–32"):
-            _make(evs=(33, 0, 0, 0, 0, 0))
+    def test_ev_over_252_raises(self):
+        with pytest.raises(ValueError, match="0–252"):
+            _make(evs=(253, 0, 0, 0, 0, 0))
 
-    def test_ev_sum_over_66_raises(self):
-        with pytest.raises(ValueError, match="66"):
-            _make(evs=(32, 32, 3, 0, 0, 0))
+    def test_ev_sum_over_510_raises(self):
+        with pytest.raises(ValueError, match="510"):
+            _make(evs=(252, 252, 8, 0, 0, 0))
 
     def test_iv_out_of_range_raises(self):
         with pytest.raises(ValueError, match="0–31"):

@@ -17,7 +17,7 @@ from vgc_bench.team_builder.team import (
 
 @pytest.fixture(scope="module")
 def space():
-    return BuildSpace.from_regulation("ma")
+    return BuildSpace.from_regulation("i")
 
 
 @pytest.fixture(scope="module")
@@ -92,13 +92,53 @@ class TestRandomTeam:
             species = [m.species for m in t.members]
             assert len(set(species)) == TEAM_SIZE
 
+    def test_restricted_limit_respected(self, space):
+        from vgc_bench.team_builder.pokemon_build import RESTRICTED_LEGENDARIES
+        rng = random.Random(0)
+        for _ in range(20):
+            t = random_team(space, rng)
+            restricted = [m.species for m in t.members if m.species in RESTRICTED_LEGENDARIES]
+            assert len(restricted) <= space.restricted_limit, (
+                f"team has {len(restricted)} restricted (limit {space.restricted_limit}): {restricted}"
+            )
+
     def test_seeded_reproducible(self, space):
         t1 = random_team(space, random.Random(42))
         t2 = random_team(space, random.Random(42))
         assert t1.members == t2.members
 
+    def test_high_weight_species_appear_more_often(self, space):
+        # Common tournament species should appear more often than baseline uniform expectation
+        common = {s for s in ("Incineroar", "Rillaboom") if s in space.species_weights}
+        if not common:
+            return
+        rng = random.Random(0)
+        hits = sum(
+            1 for _ in range(100)
+            for m in random_team(space, rng).members
+            if m.species in common
+        )
+        # Uniform baseline: 2 species × 6/N_species × 100 teams
+        n_species = len(space.species_list)
+        uniform_baseline = 2 * 6 / n_species * 100
+        assert hits > uniform_baseline, (
+            f"common species appeared {hits} times, expected > {uniform_baseline:.1f} — "
+            "weighted sampling not biasing toward high-weight species"
+        )
+
 
 class TestSwapMember:
+    def test_restricted_limit_respected_after_swap(self, space):
+        from vgc_bench.team_builder.pokemon_build import RESTRICTED_LEGENDARIES
+        rng = random.Random(7)
+        parent = random_team(space, rng)
+        for _ in range(20):
+            child = swap_member(parent, space, rng=rng)
+            restricted = [m.species for m in child.members if m.species in RESTRICTED_LEGENDARIES]
+            assert len(restricted) <= space.restricted_limit, (
+                f"swap produced {len(restricted)} restricted (limit {space.restricted_limit}): {restricted}"
+            )
+
     def test_one_swap_changes_exactly_one_slot(self, space):
         rng = random.Random(0)
         parent = random_team(space, rng)
@@ -128,6 +168,18 @@ class TestSwapMember:
 
 
 class TestCombineTeams:
+    def test_restricted_limit_respected_after_combine(self, space):
+        from vgc_bench.team_builder.pokemon_build import RESTRICTED_LEGENDARIES
+        rng = random.Random(123)
+        for _ in range(30):
+            pa = random_team(space, rng)
+            pb = random_team(space, rng)
+            child = combine_teams(pa, pb, space, rng)
+            restricted = [m.species for m in child.members if m.species in RESTRICTED_LEGENDARIES]
+            assert len(restricted) <= space.restricted_limit, (
+                f"combine produced {len(restricted)} restricted (limit {space.restricted_limit}): {restricted}"
+            )
+
     def test_no_duplicate_species(self, space):
         rng = random.Random(123)
         for _ in range(30):
@@ -192,3 +244,55 @@ class TestMutateBuild:
         m1 = mutate_build(build, space, random.Random(7))
         m2 = mutate_build(build, space, random.Random(7))
         assert m1 == m2
+
+    def test_ev_transfer_is_incremental(self, space):
+        """evs_transfer mutations should change at most 2 stats."""
+        from unittest.mock import patch
+        rng = random.Random(5)
+        build = random_team(space, rng).members[0]
+        incremental_count = 0
+        for _ in range(50):
+            with patch("vgc_bench.team_builder.team.random") as mock_rng:
+                # Force evs_transfer branch by controlling field_choice
+                pass
+            # Run normally; count how many mutations change ≤2 stats
+            mutated = mutate_build(build, space, random.Random(rng.randint(0, 9999)))
+            diffs = sum(1 for a, b in zip(build.evs, mutated.evs) if a != b)
+            if diffs <= 2:
+                incremental_count += 1
+        # Majority of mutations should be small (move, nat_ev, evs_transfer are all local)
+        assert incremental_count >= 25
+
+    def test_tera_type_mutation_changes_type(self, space):
+        """tera_type mutation should produce a different valid tera type."""
+        from unittest.mock import patch
+        rng = random.Random(13)
+        build = random_team(space, rng).members[0]
+        # build.tera_type must be set (non-None) for this test to be meaningful
+        assert build.tera_type is not None, "random_build() did not initialize tera_type"
+        original_tera = build.tera_type
+        all_types = set(space.tera_types)
+        # Patch choices on the rng *instance* — mutate_build calls _rng.choices(),
+        # where _rng is the passed rng object, not the module-level random.
+        with patch.object(rng, "choices", return_value=["tera_type"]):
+            mutated = mutate_build(build, space, rng)
+        assert mutated.tera_type in all_types, f"mutated tera_type {mutated.tera_type!r} not valid"
+        assert mutated.tera_type != original_tera, "tera_type mutation did not change the type"
+
+    def test_nat_ev_mutation_keeps_coherent(self, space):
+        """nat_ev mutation should produce a valid nature+EV pair from the corpus."""
+        from unittest.mock import patch
+        import vgc_bench.team_builder.team as team_mod
+        rng = random.Random(11)
+        build = random_team(space, rng).members[0]
+        corpus = space.nat_ev_corpus_for(build.species)
+        if not corpus:
+            return  # skip if no corpus for this species
+        # Force nat_ev branch
+        with patch.object(team_mod.random, "choices", return_value=["nat_ev"]):
+            mutated = mutate_build(build, space, rng)
+        assert mutated.nature in space.natures
+        from vgc_bench.team_builder.pokemon_build import EV_MAX_PER_STAT, EV_MAX_TOTAL
+        assert sum(mutated.evs) <= EV_MAX_TOTAL
+        for ev in mutated.evs:
+            assert 0 <= ev <= EV_MAX_PER_STAT

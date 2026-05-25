@@ -10,3 +10,8 @@ battle_logs/
 results*/
 trajs/
 debug*.log
+
+# Claude artifacts
+.claude/
+CLAUDE.md
+*.plan

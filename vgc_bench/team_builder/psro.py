@@ -19,7 +19,7 @@ from nashpy import Game
 from vgc_bench.team_builder.build_space import BuildSpace
 from vgc_bench.team_builder.evaluator import TeamEvaluator
 from vgc_bench.team_builder.optimizer import RoundRecord, SearchConfig, best_response_vs_mixture
-from vgc_bench.team_builder.team import CandidateTeam
+from vgc_bench.team_builder.team import CandidateTeam, team_to_dict, team_from_dict
 
 logger = logging.getLogger(__name__)
 
@@ -40,54 +40,88 @@ class PSROConfig:
     n_iterations: int = 10
     search_config: SearchConfig = field(default_factory=SearchConfig)
     port: int = 8100
-    reg: str = "ma"
+    reg: str = "i"
     output_dir: Path = Path("results/team_builder")
 
 
 def run_psro(
     config: PSROConfig,
-    meta_team: str,
+    meta_teams: list[str] | str,
     space: BuildSpace | None = None,
+    resume: bool = True,
+    # Backward-compat alias (single string)
+    meta_team: str | None = None,
 ) -> list[CandidateTeam]:
     """
     Run the PSRO adversarial team-building loop.
 
-    Starts with one fixed meta opponent team (iteration 0) and iteratively
-    adds best-response teams to the population. Converges toward teams that
-    perform well against the Nash equilibrium mixture of all found teams.
+    Seeds the population with one or more fixed meta opponent teams, then
+    iteratively adds best-response teams. Converges toward teams that perform
+    well against the Nash equilibrium mixture of the full population.
 
     Args:
-        config: PSRO configuration.
-        meta_team: Packed team string for the initial opponent.
-        space: Pre-built BuildSpace. Loads from disk when None.
+        config:      PSRO configuration.
+        meta_teams:  One packed team string, or a list of packed team strings
+                     to use as the initial seed population. When multiple teams
+                     are provided the initial payoff is seeded with 0.5 for all
+                     pairs (uniform Nash bootstrap) and the first best-response
+                     is found against the Nash mixture of all initial teams.
+        space:       Pre-built BuildSpace. Loads from disk when None.
+        resume:      If True, resume from an existing checkpoint in output_dir.
 
     Returns:
-        All found CandidateTeams sorted by final Nash weight (descending).
-        The meta_team is not included (it has no CandidateTeam wrapper).
+        All discovered CandidateTeams sorted by final Nash weight (descending).
+        Initial meta teams are not included (they have no CandidateTeam wrapper).
 
     Algorithm:
-        1. teams = [meta_team], payoff = [[0.5]]
+        1. initial_teams = meta_teams, payoff = 0.5 * ones(N, N)
         2. For each iteration:
-            a. Compute Nash distribution over teams.
+            a. Compute Nash distribution over current population.
             b. Find best_response_vs_mixture(teams, nash_weights).
-            c. Evaluate new_team vs all existing teams → new payoff row/col.
-            d. Append new_team to population; extend payoff; recompute Nash.
+            c. Evaluate new_team vs all existing teams → extend payoff.
+            d. Append new_team to population; recompute Nash.
             e. Save payoff matrix and team texts to output_dir.
-        3. Return found teams sorted by Nash weight descending.
+        3. Return discovered teams sorted by Nash weight descending.
     """
+    # Normalise to list; support legacy single-string kwarg
+    if meta_team is not None and not meta_teams:
+        meta_teams = [meta_team]
+    if isinstance(meta_teams, str):
+        meta_teams = [meta_teams]
+
     if space is None:
         space = BuildSpace.from_regulation(config.reg)
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # opponent_teams: packed strings (first entry is the fixed meta team)
-    opponent_teams: list[str] = [meta_team]
-    # found_teams: CandidateTeam objects for teams we discovered
-    found_teams: list[CandidateTeam] = []
-    # payoff[i][j] = win rate of opponent_teams[i] vs opponent_teams[j]
-    payoff = np.array([[0.5]])
+    _ckpt_path = config.output_dir / "psro_checkpoint.json"
+    completed_iterations = 0
 
-    for iteration in range(config.n_iterations):
+    if resume and _ckpt_path.exists():
+        logger.info("Found checkpoint — resuming PSRO from %s", _ckpt_path)
+        _ckpt = json.loads(_ckpt_path.read_text(encoding="utf-8"))
+        completed_iterations = _ckpt["completed_iterations"]
+        opponent_teams = _ckpt["opponent_teams"]
+        payoff = np.array(_ckpt["payoff"])
+        found_teams = [team_from_dict(d) for d in _ckpt["found_teams"]]
+        n_initial = _ckpt.get("n_initial", 1)  # legacy checkpoints had 1 initial team
+        logger.info(
+            "Resumed: %d/%d iterations done, population size %d.",
+            completed_iterations, config.n_iterations, len(opponent_teams),
+        )
+    else:
+        # Seed with all provided meta teams
+        opponent_teams = list(meta_teams)
+        n_initial = len(opponent_teams)
+        # found_teams: CandidateTeam objects for teams we discovered (not the seeds)
+        found_teams = []
+        # Bootstrap payoff: 0.5 for every pair (uniform Nash → equal initial weights)
+        payoff = np.full((n_initial, n_initial), 0.5)
+        logger.info(
+            "Starting fresh PSRO with %d initial meta team(s).", n_initial
+        )
+
+    for iteration in range(completed_iterations, config.n_iterations):
         logger.info("PSRO iteration %d/%d", iteration + 1, config.n_iterations)
 
         # Compute Nash over current population
@@ -100,6 +134,7 @@ def run_psro(
             weights=nash_weights,
             config=config.search_config,
             space=space,
+            snapshot_dir=config.output_dir / f"search_iter{iteration:03d}",
         )
         logger.info(
             "Best response win rate: %.3f (after %d rounds)",
@@ -126,11 +161,13 @@ def run_psro(
 
         _save_payoff(payoff, config.output_dir, iteration)
         _save_teams(found_teams, config.output_dir, iteration)
+        completed_iterations = iteration + 1
+        _save_psro_checkpoint(_ckpt_path, completed_iterations, opponent_teams, payoff, found_teams, n_initial)
 
     # Final Nash weights over the full population
     final_weights = _nash_weights(payoff)
-    # found_teams corresponds to indices 1..n in opponent_teams (index 0 is meta)
-    found_with_weights = list(zip(found_teams, final_weights[1:]))
+    # found_teams corresponds to indices n_initial..end in opponent_teams
+    found_with_weights = list(zip(found_teams, final_weights[n_initial:]))
     found_with_weights.sort(key=lambda x: x[1], reverse=True)
 
     logger.info("PSRO complete. Final Nash weights (found teams only):")
@@ -138,6 +175,27 @@ def run_psro(
         logger.info("  win_rate=%.3f, nash_weight=%.3f", t.win_rate or 0.0, w)
 
     return [t for t, _ in found_with_weights]
+
+
+def _save_psro_checkpoint(
+    path: Path,
+    completed_iterations: int,
+    opponent_teams: list[str],
+    payoff: np.ndarray,
+    found_teams: list[CandidateTeam],
+    n_initial: int = 1,
+) -> None:
+    payload = {
+        "type": "psro",
+        "completed_iterations": completed_iterations,
+        "n_initial": n_initial,
+        "opponent_teams": opponent_teams,
+        "payoff": payoff.tolist(),
+        "found_teams": [team_to_dict(t) for t in found_teams],
+    }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(path)
 
 
 def _nash_weights(payoff: np.ndarray) -> list[float]:

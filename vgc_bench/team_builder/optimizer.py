@@ -7,6 +7,7 @@ win rate against a fixed opponent or a Nash mixture of opponents.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 from dataclasses import dataclass, field
@@ -47,6 +48,9 @@ class SearchConfig:
             Set to 0.0 to disable diversity filtering.
         seed:               Random seed; None means non-deterministic.
         reg:                Regulation pool to sample from (default "ma").
+        learning_rate:      Rate at which per-species sampling weights shift toward
+            elite choices after each round. 0.0 disables online updates (Phase 1
+            default); enable in Phase 2 once the update logic is validated.
     """
 
     rounds: int = 10
@@ -61,7 +65,8 @@ class SearchConfig:
     n_swaps: int = 1
     diversity_threshold: float = 0.0
     seed: int | None = None
-    reg: str = "ma"
+    reg: str = "i"
+    learning_rate: float = 0.0
 
 
 @dataclass
@@ -79,6 +84,7 @@ def best_response(
     opponent_team: str,
     config: SearchConfig | None = None,
     space: BuildSpace | None = None,
+    snapshot_dir: Path | None = None,
 ) -> tuple[CandidateTeam, list[RoundRecord]]:
     """
     Find the best team against a single fixed opponent.
@@ -107,7 +113,7 @@ def best_response(
         device=config.device,
         reg=config.reg,
     )
-    return _run_search(evaluator, config, space)
+    return _run_search(evaluator, config, space, snapshot_dir=snapshot_dir)
 
 
 def best_response_vs_mixture(
@@ -115,6 +121,7 @@ def best_response_vs_mixture(
     weights: list[float],
     config: SearchConfig | None = None,
     space: BuildSpace | None = None,
+    snapshot_dir: Path | None = None,
 ) -> tuple[CandidateTeam, list[RoundRecord]]:
     """
     Find the best team against a Nash mixture of opponent teams.
@@ -147,7 +154,7 @@ def best_response_vs_mixture(
     def mixture_evaluate(team: CandidateTeam) -> CandidateTeam:
         return evaluator.evaluate_vs_mixture(team, opponents, weights)
 
-    return _run_search(evaluator, config, space, evaluate_fn=mixture_evaluate)
+    return _run_search(evaluator, config, space, evaluate_fn=mixture_evaluate, snapshot_dir=snapshot_dir)
 
 
 def _run_search(
@@ -155,6 +162,7 @@ def _run_search(
     config: SearchConfig,
     space: BuildSpace,
     evaluate_fn=None,
+    snapshot_dir: Path | None = None,
 ) -> tuple[CandidateTeam, list[RoundRecord]]:
     """
     Core (population + candidates) search loop.
@@ -171,6 +179,9 @@ def _run_search(
     if evaluate_fn is None:
         evaluate_fn = evaluator.evaluate
 
+    if snapshot_dir is not None:
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+
     rng = random.Random(config.seed)
     cache: dict[tuple, float] = {}
     history: list[RoundRecord] = []
@@ -180,6 +191,7 @@ def _run_search(
     elites = [random_team(space, rng) for _ in range(config.population)]
     elites, hits, misses = _evaluate_batch(elites, evaluate_fn, cache)
     elites = _select(elites, config.population, config.diversity_threshold)
+    space.update_from_elites(elites, lr=config.learning_rate)
     overall_best = elites[0]
 
     record = RoundRecord(
@@ -197,41 +209,52 @@ def _run_search(
         hits,
         misses,
     )
+    if snapshot_dir is not None:
+        _write_round_snapshot(elites[0], record, elites, snapshot_dir)
 
-    for r in range(1, config.rounds + 1):
-        new_candidates = _produce_candidates(
-            elites,
-            space,
-            config.candidates,
-            config.swap_probability,
-            config.mutate_probability,
-            config.n_swaps,
-            rng,
-        )
-        new_candidates, hits, misses = _evaluate_batch(
-            new_candidates, evaluate_fn, cache
-        )
-        combined = elites + new_candidates
-        elites = _select(combined, config.population, config.diversity_threshold)
+    try:
+        for r in range(1, config.rounds + 1):
+            new_candidates = _produce_candidates(
+                elites,
+                space,
+                config.candidates,
+                config.swap_probability,
+                config.mutate_probability,
+                config.n_swaps,
+                rng,
+            )
+            new_candidates, hits, misses = _evaluate_batch(
+                new_candidates, evaluate_fn, cache
+            )
+            combined = elites + new_candidates
+            elites = _select(combined, config.population, config.diversity_threshold)
+            space.update_from_elites(elites, lr=config.learning_rate)
 
-        if elites[0].win_rate > overall_best.win_rate:  # type: ignore[operator]
-            overall_best = elites[0]
+            if elites[0].win_rate > overall_best.win_rate:  # type: ignore[operator]
+                overall_best = elites[0]
 
-        record = RoundRecord(
-            round=r,
-            best_win_rate=elites[0].win_rate,  # type: ignore[arg-type]
-            mean_win_rate=sum(t.win_rate for t in elites) / len(elites),  # type: ignore[arg-type]
-            cache_hits=hits,
-            cache_misses=misses,
-        )
-        history.append(record)
-        logger.info(
-            "Round %d — best: %.3f, mean: %.3f, cache: %d/%d",
-            r,
-            record.best_win_rate,
-            record.mean_win_rate,
-            hits,
-            misses,
+            record = RoundRecord(
+                round=r,
+                best_win_rate=elites[0].win_rate,  # type: ignore[arg-type]
+                mean_win_rate=sum(t.win_rate for t in elites) / len(elites),  # type: ignore[arg-type]
+                cache_hits=hits,
+                cache_misses=misses,
+            )
+            history.append(record)
+            logger.info(
+                "Round %d — best: %.3f, mean: %.3f, cache: %d/%d",
+                r,
+                record.best_win_rate,
+                record.mean_win_rate,
+                hits,
+                misses,
+            )
+            if snapshot_dir is not None:
+                _write_round_snapshot(elites[0], record, elites, snapshot_dir)
+    except KeyboardInterrupt:
+        logger.warning(
+            "_run_search interrupted at round %d/%d — returning partial best (win_rate=%.3f).",
+            r, config.rounds, overall_best.win_rate if overall_best else 0.0,
         )
 
     return overall_best, history
@@ -290,6 +313,36 @@ def _select(
         selected.extend(remaining[: k - len(selected)])
 
     return selected[:k]
+
+
+def _write_round_snapshot(
+    best: CandidateTeam,
+    record: RoundRecord,
+    elites: list[CandidateTeam],
+    snapshot_dir: Path,
+) -> None:
+    snap = snapshot_dir / f"round_{record.round:03d}.txt"
+    snap.write_text(
+        f"# round={record.round}  best_win_rate={record.best_win_rate:.3f}"
+        f"  mean_win_rate={record.mean_win_rate:.3f}\n"
+        + best.to_showdown_text(),
+        encoding="utf-8",
+    )
+    species_counts: dict[str, int] = {}
+    for team in elites:
+        for m in team.members:
+            species_counts[m.species] = species_counts.get(m.species, 0) + 1
+    top_species = sorted(species_counts, key=lambda s: -species_counts[s])[:12]
+    entry = {
+        "round": record.round,
+        "best_win_rate": round(record.best_win_rate, 4),
+        "mean_win_rate": round(record.mean_win_rate, 4),
+        "cache_hits": record.cache_hits,
+        "cache_misses": record.cache_misses,
+        "elite_top_species": top_species,
+    }
+    with (snapshot_dir / "rounds.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
 def _produce_candidates(

@@ -99,6 +99,45 @@ results = asyncio.run(cross_evaluate([random_player, mbp_player, sh_player], n_c
 print(results)
 ```
 
+## 🏗️ Team Builder
+
+> **This section covers work added in the [`feature/team_building`](../../tree/feature/team_building) fork branch.**
+
+Generates competitive VGC teams from scratch by optimizing win rate against a
+pool of meta teams. Two modes are provided:
+
+- **Evolutionary PSRO** (`python -m vgc_bench.team_builder`) — (μ + λ) search
+  with swap/mutate/crossover operators; no GPU required.
+- **RL SP-PSRO** (`python -m vgc_bench.team_builder.rl.train`) — REINFORCE over
+  a `TeamBuilderNetwork` that autoregressively generates teams conditioned on the
+  current population and Nash weights.
+
+Both modes target **Reg I** (`gen9vgc2025regi`), enforce the Limit Two
+Restricted rule, and use the upstream BC checkpoint as the battle agent for
+high-quality win-signal estimation.
+
+See [`docs/team_builder/`](docs/team_builder/README.md) for full run instructions
+and [`docs/team_builder/architecture.md`](docs/team_builder/architecture.md) for
+the system design.
+
+```powershell
+# Unit tests — no Showdown server needed (90 tests, ~20 s)
+pytest unit_tests/test_pokemon_build.py unit_tests/test_build_space.py unit_tests/test_team_builder_team.py -v
+
+# Evolutionary PSRO seeded with 4 Reg I meta archetypes
+python -m vgc_bench.team_builder psro `
+  --meta-team teams/reg_i/featured/I1146.txt teams/reg_i/featured/I1062.txt `
+             teams/reg_i/featured/I1054.txt teams/reg_i/featured/I1063.txt `
+  --battle-agent-path results/saves_bc/seed1/100.zip `
+  --psro-iterations 8 --rounds 10 --n-battles 20 --port 8100 --output results/psro_4meta
+
+# RL SP-PSRO
+python -m vgc_bench.team_builder.rl.train `
+  --meta-teams teams/reg_i/featured/I1146.txt teams/reg_i/featured/I1062.txt `
+               teams/reg_i/featured/I1054.txt teams/reg_i/featured/I1063.txt `
+  --n-steps 10000 --iterations 5 --port 8100 --output results/rl_psro
+```
+
 ## 📊 Evaluation
 
 - [eval.py](vgc_bench/eval.py) runs the cross-play evaluation, performance test, generalization test, and ranking algorithm as described in our paper (see above)

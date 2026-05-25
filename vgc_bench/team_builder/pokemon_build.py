@@ -16,11 +16,38 @@ from dataclasses import dataclass
 # Stat order used throughout poke-env and Showdown: HP, Atk, Def, SpA, SpD, Spe
 _STAT_NAMES: tuple[str, ...] = ("HP", "Atk", "Def", "SpA", "SpD", "Spe")
 
-# Pokemon Champions format (gen9championsvgc2026regma) uses compact "stat points":
-# 0–32 per stat, total ≤ 66. These are NOT standard EVs — do not multiply by 8.
-EV_MAX_PER_STAT: int = 32
-EV_MAX_TOTAL: int = 66
+# Standard Gen 9 VGC uses official EVs: 0–252 per stat, total ≤ 510.
+EV_MAX_PER_STAT: int = 252
+EV_MAX_TOTAL: int = 510
 IV_MAX: int = 31
+
+# Pokémon that count toward the "Limit N Restricted" rule in VGC formats.
+# Covers all restricted legendaries introduced through Gen 9.
+RESTRICTED_LEGENDARIES: frozenset[str] = frozenset({
+    # Gen 1
+    "Mewtwo",
+    # Gen 2
+    "Lugia", "Ho-Oh",
+    # Gen 3
+    "Kyogre", "Groudon", "Rayquaza",
+    # Gen 4
+    "Dialga", "Dialga-Origin", "Palkia", "Palkia-Origin",
+    "Giratina", "Giratina-Origin",
+    # Gen 5
+    "Reshiram", "Zekrom", "Kyurem", "Kyurem-Black", "Kyurem-White",
+    # Gen 6
+    "Xerneas", "Yveltal", "Zygarde",
+    # Gen 7
+    "Cosmog", "Cosmoem", "Solgaleo", "Lunala",
+    "Necrozma", "Necrozma-Dawn-Wings", "Necrozma-Dusk-Mane", "Necrozma-Ultra",
+    # Gen 8
+    "Zacian", "Zacian-Crowned", "Zamazenta", "Zamazenta-Crowned", "Eternatus",
+    "Kubfu", "Urshifu", "Urshifu-Rapid-Strike",
+    "Calyrex", "Calyrex-Ice", "Calyrex-Shadow",
+    # Gen 9
+    "Koraidon", "Miraidon",
+    "Terapagos",
+})
 
 
 @dataclass(frozen=True)
@@ -36,7 +63,7 @@ class PokemonBuild:
         species:   Pokémon species name (e.g. "Charizard", "Ogerpon-Wellspring").
         item:      Held item name (e.g. "Choice Scarf").
         ability:   Ability name (e.g. "Solar Power").
-        tera_type: Tera type name (e.g. "Fire").
+        tera_type: Tera type name (e.g. "Fire"), or None for formats without Tera.
         nature:    Nature name (e.g. "Timid").
         evs:       EV spread (HP, Atk, Def, SpA, SpD, Spe). Each 0–252, mult of 4,
                    total ≤ 508.
@@ -49,11 +76,11 @@ class PokemonBuild:
     species: str
     item: str
     ability: str
-    tera_type: str
     nature: str
     evs: tuple[int, int, int, int, int, int]
     ivs: tuple[int, int, int, int, int, int]
     moves: tuple[str, str, str, str]
+    tera_type: str | None = None
 
     def __post_init__(self) -> None:
         if not self.species:
@@ -92,7 +119,8 @@ class PokemonBuild:
         lines.append(f"{self.species} @ {self.item}")
         lines.append(f"Ability: {self.ability}")
         lines.append("Level: 50")
-        lines.append(f"Tera Type: {self.tera_type}")
+        if self.tera_type is not None:
+            lines.append(f"Tera Type: {self.tera_type}")
 
         ev_parts = [
             f"{v} {name}"

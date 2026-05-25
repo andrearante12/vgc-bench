@@ -11,14 +11,16 @@ import asyncio
 import logging
 from pathlib import Path
 
-from poke_env.player import SimpleHeuristicsPlayer
+import torch
+from poke_env.player import Player, SimpleHeuristicsPlayer
 from poke_env.ps_client import ServerConfiguration
 from poke_env.teambuilder import Teambuilder
 
+from vgc_bench.src.policy_player import BatchPolicyPlayer
 from vgc_bench.src.utils import format_map
 from vgc_bench.team_builder.team import CandidateTeam
 
-_WS_URL_TEMPLATE: str = "ws://localhost:{port}/showdown/websocket"
+_WS_URL_TEMPLATE: str = "ws://127.0.0.1:{port}/showdown/websocket"
 _AUTH_URL: str = "https://play.pokemonshowdown.com/action.php?"
 
 
@@ -65,7 +67,8 @@ class TeamEvaluator:
         device: str = "cpu",
         log_level: int = logging.WARNING,
         max_concurrent: int = 10,
-        reg: str = "ma",
+        reg: str = "i",
+        save_replays: bool | str = False,
     ) -> None:
         """
         Initialise the evaluator and create the persistent player pair.
@@ -83,7 +86,7 @@ class TeamEvaluator:
             log_level: Logging verbosity (default WARNING to suppress noise).
             max_concurrent: Maximum concurrent battles per player.
             reg: VGC regulation identifier used to look up the battle format
-                (default "ma" for gen9championsvgc2026regma).
+                (default "i" for gen9vgc2025regi).
         """
         self.n_battles = n_battles
         self.port = port
@@ -92,6 +95,7 @@ class TeamEvaluator:
         self._log_level = log_level
         self._max_concurrent = max_concurrent
         self._battle_format = format_map[reg]
+        self._save_replays = save_replays
 
         self._candidate_builder = MutableTeamBuilder("")
         self._opponent_builder = MutableTeamBuilder(opponent_team)
@@ -112,10 +116,18 @@ class TeamEvaluator:
             A new CandidateTeam with win_rate set to the fraction of battles won.
         """
         self._candidate_builder.set_team(team.to_packed_team())
-        asyncio.run(
-            self._candidate.battle_against(self._opponent, n_battles=self.n_battles)
-        )
-        win_rate = self._candidate.win_rate
+        timeout = self.n_battles * 30
+        try:
+            asyncio.run(asyncio.wait_for(
+                self._candidate.battle_against(self._opponent, n_battles=self.n_battles),
+                timeout=timeout,
+            ))
+            win_rate = self._candidate.win_rate
+        except (asyncio.TimeoutError, Exception) as exc:
+            logging.getLogger(__name__).warning(
+                "battle evaluation failed (%s); returning win_rate=0.0", exc
+            )
+            win_rate = 0.0
         self._candidate.reset_battles()
         self._opponent.reset_battles()
         return team.with_win_rate(win_rate)
@@ -165,13 +177,19 @@ class TeamEvaluator:
             _AUTH_URL,
         )
 
-    def _make_player(self, builder: MutableTeamBuilder) -> SimpleHeuristicsPlayer:
-        return SimpleHeuristicsPlayer(
+    def _make_player(self, builder: MutableTeamBuilder) -> Player:
+        common_kwargs = dict(
             server_configuration=self._make_server_config(),
             battle_format=self._battle_format,
             log_level=self._log_level,
             max_concurrent_battles=self._max_concurrent,
             accept_open_team_sheet=True,
             open_timeout=None,
+            save_replays=self._save_replays,
             team=builder,
         )
+        if self._battle_agent_path is not None:
+            agent = BatchPolicyPlayer(**common_kwargs)
+            agent.set_policy(self._battle_agent_path, torch.device(self._device))
+            return agent
+        return SimpleHeuristicsPlayer(**common_kwargs)

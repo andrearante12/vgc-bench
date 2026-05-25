@@ -15,14 +15,21 @@ from poke_env.teambuilder import Teambuilder
 
 from vgc_bench.src.teams import calc_team_similarity_score
 from vgc_bench.team_builder.build_space import BuildSpace
-from vgc_bench.team_builder.pokemon_build import PokemonBuild
+from vgc_bench.team_builder.pokemon_build import EV_MAX_PER_STAT, PokemonBuild
 
 TEAM_SIZE: int = 6
 
+# Per-stat EV cap — mirrors EV_MAX_PER_STAT from pokemon_build (standard Gen 9: 252)
+_EV_MAX: int = EV_MAX_PER_STAT
+
 # Weights for the mutate_build operator: probability of mutating each field.
-# Moves are weighted highest (most options, biggest impact on team synergy).
-_MUTATION_FIELDS: tuple[str, ...] = ("move", "evs", "item", "nature", "tera_type")
-_MUTATION_WEIGHTS: tuple[float, ...] = (0.40, 0.25, 0.15, 0.10, 0.10)
+# - move:         swap one move for another from the species' pool
+# - nat_ev:       re-sample (nature, evs) jointly from the BC corpus
+# - evs_transfer: transfer points between two stats (fine-grained EV tuning)
+# - item:         swap item
+# - tera_type:    swap tera type
+_MUTATION_FIELDS: tuple[str, ...] = ("move", "nat_ev", "evs_transfer", "item", "tera_type")
+_MUTATION_WEIGHTS: tuple[float, ...] = (0.35, 0.20, 0.15, 0.20, 0.10)
 
 
 @dataclass(frozen=True)
@@ -73,6 +80,45 @@ class CandidateTeam:
         )
 
 
+def pokemon_build_to_dict(build: PokemonBuild) -> dict:
+    return {
+        "species": build.species,
+        "item": build.item,
+        "ability": build.ability,
+        "nature": build.nature,
+        "evs": list(build.evs),
+        "ivs": list(build.ivs),
+        "moves": list(build.moves),
+        "tera_type": build.tera_type,
+    }
+
+
+def pokemon_build_from_dict(d: dict) -> PokemonBuild:
+    return PokemonBuild(
+        species=d["species"],
+        item=d["item"],
+        ability=d["ability"],
+        nature=d["nature"],
+        evs=tuple(d["evs"]),
+        ivs=tuple(d["ivs"]),
+        moves=tuple(d["moves"]),
+        tera_type=d.get("tera_type"),
+    )
+
+
+def team_to_dict(team: CandidateTeam) -> dict:
+    return {
+        "win_rate": team.win_rate,
+        "members": [pokemon_build_to_dict(m) for m in team.members],
+    }
+
+
+def team_from_dict(d: dict) -> CandidateTeam:
+    members = tuple(pokemon_build_from_dict(m) for m in d["members"])
+    team = CandidateTeam(members=members)
+    return team.with_win_rate(d["win_rate"]) if d.get("win_rate") is not None else team
+
+
 def random_team(
     space: BuildSpace,
     rng: random.Random | None = None,
@@ -91,20 +137,33 @@ def random_team(
     used_species: set[str] = set()
     used_items: set[str] = set()
     members: list[PokemonBuild] = []
-    available = list(space.species_list)
-    _rng.shuffle(available)
+    available = space.species_order(_rng)
+
+    restricted_limit: int = space.restricted_limit
+    restricted_species_set: frozenset[str] = space.restricted_species
+    restricted_count: int = 0
 
     for species in available:
         if len(members) == TEAM_SIZE:
             break
-        if species not in used_species:
-            build = space.random_build(species=species, rng=_rng, forbidden_items=used_items)
-            if build.item in used_items:
-                # Species has only one item in corpus and it's already used; skip
-                continue
-            members.append(build)
-            used_species.add(species)
-            used_items.add(build.item)
+        if species in used_species:
+            continue
+        # Enforce restricted legendary limit (0 = no restriction)
+        if (
+            restricted_limit > 0
+            and species in restricted_species_set
+            and restricted_count >= restricted_limit
+        ):
+            continue
+        build = space.random_build(species=species, rng=_rng, forbidden_items=used_items)
+        if build.item in used_items:
+            # Species has only one item in corpus and it's already used; skip
+            continue
+        members.append(build)
+        used_species.add(species)
+        used_items.add(build.item)
+        if species in restricted_species_set:
+            restricted_count += 1
 
     if len(members) < TEAM_SIZE:
         raise ValueError(
@@ -145,16 +204,37 @@ def swap_member(
     # Items held by slots that are NOT being swapped are fixed constraints
     used_items = {members[i].item for i in range(TEAM_SIZE) if i not in swap_slot_set}
 
+    restricted_limit: int = space.restricted_limit
+    restricted_species_set: frozenset[str] = space.restricted_species
+
     for slot in swap_slots:
         evicted_species = members[slot].species
         current_species.discard(evicted_species)
 
-        species_candidates = [s for s in space.species_list if s not in current_species]
+        # Count restricted Pokémon already committed (everything in current_species
+        # after discarding the evicted slot).
+        current_restricted = sum(1 for s in current_species if s in restricted_species_set)
+
+        all_ordered = space.species_order(_rng)
+        if restricted_limit > 0:
+            species_candidates = [
+                s for s in all_ordered
+                if s not in current_species
+                and (
+                    s not in restricted_species_set
+                    or current_restricted < restricted_limit
+                )
+            ]
+            if not species_candidates:
+                # Corpus too small to satisfy restricted limit — relax constraint
+                species_candidates = [s for s in all_ordered if s not in current_species]
+        else:
+            species_candidates = [s for s in all_ordered if s not in current_species]
+
         if not species_candidates:
             raise ValueError(
                 "build space too small to find a replacement respecting the species clause"
             )
-        _rng.shuffle(species_candidates)
         new_build = None
         for candidate_species in species_candidates:
             build = space.random_build(
@@ -205,34 +285,46 @@ def mutate_build(
     if field_choice == "move":
         species_moves = space.moves_for(build.species)
         current_set = set(build.moves)
-        # Pick a slot to replace
         slot = _rng.randrange(4)
-        current_move = build.moves[slot]
         alternatives = [m for m in species_moves if m not in current_set]
         if not alternatives:
-            return build  # no alternative available
+            return build
         new_moves = list(build.moves)
         new_moves[slot] = _rng.choice(alternatives)
         return build.replace(moves=tuple(new_moves))  # type: ignore[arg-type]
 
-    elif field_choice == "evs":
-        return build.replace(evs=space.random_evs(_rng))
+    elif field_choice == "nat_ev":
+        # Re-sample (nature, evs) jointly from the BC corpus for this species.
+        corpus = space.nat_ev_corpus_for(build.species)
+        if corpus:
+            new_nature, new_evs = _rng.choice(corpus)
+        else:
+            new_nature = _rng.choice(space.natures)
+            new_evs = space.random_evs(_rng)
+        return build.replace(nature=new_nature, evs=new_evs)
+
+    elif field_choice == "evs_transfer":
+        # Transfer a random number of EV points from one stat to another.
+        current = list(build.evs)
+        sources = [i for i in range(6) if current[i] > 0]
+        dests = [i for i in range(6) if current[i] < _EV_MAX]
+        pairs = [(s, d) for s in sources for d in dests if s != d]
+        if not pairs:
+            return build.replace(evs=space.random_evs(_rng))
+        src, dst = _rng.choice(pairs)
+        amount = _rng.randint(1, min(current[src], _EV_MAX - current[dst]))
+        current[src] -= amount
+        current[dst] += amount
+        return build.replace(evs=tuple(current))  # type: ignore[arg-type]
 
     elif field_choice == "item":
         forbidden = (forbidden_items or set()) | {build.item}
         alternatives = [i for i in space.items_for(build.species) if i not in forbidden]
         if not alternatives:
-            # Relax item-clause constraint as a last resort
             alternatives = [i for i in space.items_for(build.species) if i != build.item]
         if not alternatives:
             return build
         return build.replace(item=_rng.choice(alternatives))
-
-    elif field_choice == "nature":
-        alternatives = [n for n in space.natures if n != build.nature]
-        if not alternatives:
-            return build
-        return build.replace(nature=_rng.choice(alternatives))
 
     else:  # tera_type
         alternatives = [t for t in space.tera_types if t != build.tera_type]
@@ -269,21 +361,37 @@ def combine_teams(
     used_species: set[str] = set()
     used_items: set[str] = set()
 
+    restricted_limit: int = space.restricted_limit
+    restricted_species_set: frozenset[str] = space.restricted_species
+    restricted_count: int = 0
+
+    def _restricted_ok(species: str) -> bool:
+        """Return True if adding this species respects the restricted limit."""
+        if restricted_limit <= 0 or species not in restricted_species_set:
+            return True
+        return restricted_count < restricted_limit
+
     for a, b in zip(team_a.members, team_b.members):
         chosen, fallback = (a, b) if _rng.random() < 0.5 else (b, a)
         placed = False
         # Try each parent candidate; accept if no species or item conflict
         for candidate in (chosen, fallback):
-            if candidate.species not in used_species and candidate.item not in used_items:
+            if (
+                candidate.species not in used_species
+                and candidate.item not in used_items
+                and _restricted_ok(candidate.species)
+            ):
                 result.append(candidate)
                 used_species.add(candidate.species)
                 used_items.add(candidate.item)
+                if candidate.species in restricted_species_set:
+                    restricted_count += 1
                 placed = True
                 break
         if not placed:
-            # Try parents again, accepting species conflict (re-roll item)
+            # Try parents again, accepting item conflict (re-roll item only)
             for candidate in (chosen, fallback):
-                if candidate.species not in used_species:
+                if candidate.species not in used_species and _restricted_ok(candidate.species):
                     new_build = space.random_build(
                         species=candidate.species, rng=_rng, forbidden_items=used_items
                     )
@@ -291,11 +399,19 @@ def combine_teams(
                         result.append(new_build)
                         used_species.add(new_build.species)
                         used_items.add(new_build.item)
+                        if new_build.species in restricted_species_set:
+                            restricted_count += 1
                         placed = True
                         break
         if not placed:
-            # Both species conflict or item still conflicts; scan fresh species
-            options = [s for s in space.species_list if s not in used_species]
+            # Both parent species conflict or restricted limit reached; scan fresh species
+            options = [
+                s for s in space.species_list
+                if s not in used_species and _restricted_ok(s)
+            ]
+            if not options:
+                # Relax restricted limit as a last resort (shouldn't happen normally)
+                options = [s for s in space.species_list if s not in used_species]
             if not options:
                 raise ValueError(
                     "build space too small to resolve species conflict in combine_teams"
@@ -314,5 +430,7 @@ def combine_teams(
             result.append(new_build)
             used_species.add(new_build.species)
             used_items.add(new_build.item)
+            if new_build.species in restricted_species_set:
+                restricted_count += 1
 
     return CandidateTeam(members=tuple(result))
