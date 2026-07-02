@@ -1,183 +1,68 @@
-# VGC-Bench
+# VGC-Bench — Team Builder
 
-[![CI](https://github.com/cameronangliss/vgc-bench/actions/workflows/tests.yml/badge.svg)](https://github.com/cameronangliss/vgc-bench/actions/workflows/tests.yml)
-[![Python 3.10‒3.13](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)](https://github.com/cameronangliss/vgc-bench)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![arXiv](https://img.shields.io/badge/arXiv-2506.10326-b31b1b)](https://arxiv.org/abs/2506.10326)
 
-This is the official code for [VGC-Bench: Towards Mastering Diverse Team Strategies in Competitive Pokémon](https://arxiv.org/abs/2506.10326).
+> **A fork of [VGC-Bench](https://github.com/cameronangliss/vgc-bench)** (Angliss et al., [arXiv:2506.10326](https://arxiv.org/abs/2506.10326)). The original benchmark trains agents to *play* a fixed Pokémon VGC team. This fork adds a **Team Builder** that generates the *team itself*. All credit for the underlying benchmark goes to the original authors — see [Credits](#credits).
 
-This benchmark includes:
-- multi-agent reinforcement learning (RL) with 4 Policy Space Response Oracle (PSRO) algorithms to fine-tune an agent initialized either randomly or with the output of the BC pipeline
-- a behavior cloning (BC) pipeline to gather human demonstrations, process them into state-action pairs, and train a model to imitate human play
-- a basic Large Language Model (LLM) player that any LLM can easily be plugged into
-- 3 heuristic players from [poke-env](https://github.com/hsahovic/poke-env)
+## What I added
 
-# 🛠️ Setup
-Prerequisites:
-1. Python (I use v3.13)
-1. NodeJS and npm (whatever pokemon-showdown requires)
+A **Team Builder** that discovers competitive **Reg I** VGC teams from scratch by optimizing win rate against a pool of meta archetypes. Team construction is framed as a two-level game-theoretic search (PSRO) with two interchangeable best-response oracles:
 
-Run the following to ensure that pokemon showdown is configured:
-```
-git submodule update --init --recursive
-cd pokemon-showdown
-npm i
-node pokemon-showdown start --no-security
-```
-Let that run until you see the following text:
-```
-RESTORE CHATROOM: lobby
-RESTORE CHATROOM: staff
-Worker 1 now listening on 0.0.0.0:8000
-Test your server at http://localhost:8000
-```
-This shows that you can locally host the showdown server.
+- **Evolutionary PSRO** — a lightweight approach (no GPU needed) that "breeds" better teams over many rounds: it keeps the strongest teams found so far, then creates new candidates by swapping members, tweaking individual Pokémon, and mixing two good teams together — always staying within real, tournament-legal options.
+- **RL SP-PSRO** — a neural network that learns to build teams one Pokémon at a time, getting better through trial and error as it sees which teams actually win. It focuses its effort on beating whatever opponents are currently most threatening, and gets a head start from VGC-Bench's pre-trained battle agent.
 
-Install project dependencies by running:
-```
-pip install .[dev]
-```
-NOTE: if this doesn't work due to the `open-spiel` dependency, feel free to remove it in `pyproject.toml`. It is only necessary for the `vgc_bench/eval` module.
+Both modes enforce real VGC rules (Species / Item Clause, Limit Two Restricted) and pilot candidate teams with the upstream BC checkpoint for a realistic win signal.
 
-# 👨‍💻 How to use
+📄 Full details: [run guide](docs/team_builder/README.md) · [architecture](docs/team_builder/architecture.md)
 
-NOTE: Unless you're playing your policy on the live Pokémon Showdown servers with [play.py](vgc_bench/play.py), you must locally host your own server by running `node pokemon-showdown start <PORT> --no-security` from `pokemon-showdown/` (done automatically if using bash scripts).
+## Demo
 
-All `.py` files in `vgc_bench/` are runnable modules and (with the exception of [scrape_data.py](vgc_bench/scrape_data.py) and [visualize.py](vgc_bench/visualize.py)) have `--help` text. Run them from the repo root, e.g. `python -m vgc_bench.train`. By contrast, all `.py` files in `vgc_bench/src/` are not modules, and are not intended to be run standalone.
+<video src="vgc_demo.webm" autoplay loop muted playsinline controls width="100%">
+  Your browser does not support embedded video —
+  <a href="vgc_demo.webm">download the demo (vgc_demo.webm)</a>.
+</video>
 
-## 🏆 Population-based Reinforcement Learning
+> The Team Builder generating and evaluating a Reg I team end-to-end. If the video does not autoplay in your viewer, [open <code>vgc_demo.webm</code> directly](vgc_demo.webm).
 
-The training code offers the following PSRO algorithms:
-- pure self-play
-- fictitious play
-- double oracle method
-- policy exploitation
+## Quick start
 
-...as well as some special training options:
-- initializing the policy with the output of the BC pipeline; if `--behavior_clone` is enabled and no local BC checkpoint is present, `vgc_bench.train` automatically downloads [`results/saves_bc/seed1/100.zip`](https://huggingface.co/cameronangliss/vgc-bench-models/blob/main/results/saves_bc/seed1/100.zip) from the [vgc-bench-models](https://huggingface.co/cameronangliss/vgc-bench-models) model repo
-- frame stacking with specified number of frames
-- excluding mirror matches (p1 and p2 using the same team)
-- starting agent with random teampreview at the beginning of each game
-- matchup solving with specific team strings (pass both `--team1` and `--team2` to train on a single matchup)
+```bash
+# 1. Install
+python3 -m venv .venv && source .venv/bin/activate
+pip install ".[dev]"
 
-See [train.sh](train.sh) for running multiple training runs simultaneously with automatic pokemon-showdown server management, or [train_matchup.sh](train_matchup.sh) for an example of training on a specific team matchup.
-If you don't want to run `train.py` yourself, pre-trained models are available in [vgc-bench-models](https://huggingface.co/cameronangliss/vgc-bench-models).
-
-## 📚 Behavior Cloning
-
-1. [scrape_logs.py](vgc_bench/scrape_logs.py) scrapes logs from the [Pokémon Showdown replay database](https://replay.pokemonshowdown.com), automatically filtering out bad logs and only scraping logs with open team sheets (OTS)
-    - optional parallelization (strongly recommended)
-    - if you don't need logs after 05/04/2026, just download our pre-scraped dataset of logs from [vgc-battle-logs](https://huggingface.co/datasets/cameronangliss/vgc-battle-logs) and place the files in `battle_logs/`
-1. [logs2trajs.py](vgc_bench/logs2trajs.py) parses the logs into trajectories composed of state-action transitions
-    - optional parallelization (strongly recommended)
-    - `--min_rating` and `--only_winner` can be used to filter out low-Elo and losing trajectories respectively
-1. [pretrain.py](vgc_bench/pretrain.py) uses the gathered trajectories to train a policy with behavior cloning
-    - frame stacking with specified number of frames
-    - configurable fraction of dataset to load into memory at any given time (if not set low enough, program may run out of memory)
-    - see [pretrain.sh](pretrain.sh) for running behavior cloning with automatic pokemon-showdown server management
-    - if you don't want to run `pretrain.py` yourself, use the pre-trained BC checkpoint in [vgc-bench-models](https://huggingface.co/cameronangliss/vgc-bench-models)
-
-## 🤖 LLMs
-
-See [llm.py](vgc_bench/src/llm.py) for the provided LLMPlayer wrapper class. We use `meta-llama/Meta-Llama-3.1-8B-Instruct`, but the user may replace logic in the `setup_llm` and `get_response` methods to use a different LLM.
-
-## 🎲 Heuristics
-
-See [poke-env](https://github.com/hsahovic/poke-env) for detailed examples of using the heuristic players. For example:
-
-```python
-import asyncio
-
-from poke_env import cross_evaluate
-from poke_env.player import MaxBasePowerPlayer, RandomPlayer, SimpleHeuristicsPlayer
-
-random_player = RandomPlayer()
-mbp_player = MaxBasePowerPlayer()
-sh_player = SimpleHeuristicsPlayer()
-results = asyncio.run(cross_evaluate([random_player, mbp_player, sh_player], n_challenges=100))
-print(results)
+# 2. Start the Showdown server (separate terminal, leave running)
+cd pokemon-showdown && node pokemon-showdown start --no-security --port 8100
 ```
 
-## 🏗️ Team Builder
-
-> **This section covers work added in the [`feature/team_building`](../../tree/feature/team_building) fork branch.**
-
-Generates competitive VGC teams from scratch by optimizing win rate against a
-pool of meta teams. Two modes are provided:
-
-- **Evolutionary PSRO** (`python -m vgc_bench.team_builder`) — (μ + λ) search
-  with swap/mutate/crossover operators; no GPU required.
-- **RL SP-PSRO** (`python -m vgc_bench.team_builder.rl.train`) — REINFORCE over
-  a `TeamBuilderNetwork` that autoregressively generates teams conditioned on the
-  current population and Nash weights.
-
-Both modes target **Reg I** (`gen9vgc2025regi`), enforce the Limit Two
-Restricted rule, and use the upstream BC checkpoint as the battle agent for
-high-quality win-signal estimation.
-
-See [`docs/team_builder/`](docs/team_builder/README.md) for full run instructions
-and [`docs/team_builder/architecture.md`](docs/team_builder/architecture.md) for
-the system design.
-
-```powershell
-# Unit tests — no Showdown server needed (90 tests, ~20 s)
-pytest unit_tests/test_pokemon_build.py unit_tests/test_build_space.py unit_tests/test_team_builder_team.py -v
-
-# Evolutionary PSRO seeded with 4 Reg I meta archetypes
-python -m vgc_bench.team_builder psro `
-  --meta-team teams/reg_i/featured/I1146.txt teams/reg_i/featured/I1062.txt `
-             teams/reg_i/featured/I1054.txt teams/reg_i/featured/I1063.txt `
-  --battle-agent-path results/saves_bc/seed1/100.zip `
-  --psro-iterations 8 --rounds 10 --n-battles 20 --port 8100 --output results/psro_4meta
-
-# RL SP-PSRO
-python -m vgc_bench.team_builder.rl.train `
-  --meta-teams teams/reg_i/featured/I1146.txt teams/reg_i/featured/I1062.txt `
-               teams/reg_i/featured/I1054.txt teams/reg_i/featured/I1063.txt `
+```bash
+# RL SP-PSRO — trains the neural team-builder policy
+python -m vgc_bench.team_builder.rl.train \
+  --meta-teams teams/reg_i/featured/I1146.txt teams/reg_i/featured/I1062.txt \
+               teams/reg_i/featured/I1054.txt teams/reg_i/featured/I1063.txt \
   --n-steps 10000 --iterations 5 --port 8100 --output results/rl_psro
+
+# Evolutionary PSRO — fast, CPU-only, no neural policy
+python -m vgc_bench.team_builder psro \
+  --meta-team teams/reg_i/featured/I1146.txt teams/reg_i/featured/I1062.txt \
+              teams/reg_i/featured/I1054.txt teams/reg_i/featured/I1063.txt \
+  --psro-iterations 8 --rounds 10 --n-battles 20 --port 8100 --output results/psro_4meta
 ```
 
-## 📊 Evaluation
+Add `--battle-agent-path <checkpoint.zip> --device cuda:0` to pilot candidates with a trained
+battle agent instead of the default heuristic. See the [run guide](docs/team_builder/README.md)
+for checkpoints, all flags, and how to read the results.
 
-- [eval.py](vgc_bench/eval.py) runs the cross-play evaluation, performance test, generalization test, and ranking algorithm as described in our paper (see above)
-    - see [eval.sh](eval.sh) for running multiple evaluations simultaneously with automatic pokemon-showdown server management
-- [play.py](vgc_bench/play.py) loads a saved policy onto the live Pokémon Showdown servers, where the policy can receive challenges from other users or enter the online Elo ladder
-- [visualize.py](vgc_bench/visualize.py) processes cross-evaluation results into heatmaps and features conversion functions for LaTeX and Markdown formats
+```bash
+# Tests (no Showdown server needed)
+pytest unit_tests/test_pokemon_build.py unit_tests/test_build_space.py \
+       unit_tests/test_team_builder_team.py unit_tests/test_team_builder_network.py -v
+```
 
-### Cross-evaluation of all AI agents
+## Credits
 
-For each run, 200 battles were used to compare agents, except for LLM player which was compared with 20 battles. The heatmap below averages the results of 5 independent training runs for each trainable agent, accounting for 1000 total battles in each agent comparison, and 100 battles per comparison for the LLM player.
-
-![figures/heatmaps_avg.png](figures/heatmaps_avg.png)
-
-Legend: R = random player, MBP = max base power player, SH = simple heuristics player, LLM = LLM player, SP = self-play agent, FP = fictitious play agent, DO = double oracle agent, BC = behavior cloning agent, BCSP = self-play agent initialized with behavior cloning, BCFP = fictitious play agent initialized with behavior cloning, BCDO = double oracle agent initialized with behavior cloning
-
-### Performance Test
-
-This test compares the performance of the strongest method on average across runs 1-5 of the 1, 4, 16, and 64 team setting with the one team that they all had training exposure to.
-
-| # teams   | 1 (BCSP) | 4 (BCSP) | 16 (BCDO) | 64 (BCSP) |
-|-----------|----------|----------|-----------|-----------|
-| 1 (BCSP)  | --       | 0.699    | 0.74      | 0.698     |
-| 4 (BCSP)  | 0.301    | --       | 0.594     | 0.672     |
-| 16 (BCDO) | 0.26     | 0.406    | --        | 0.644     |
-| 64 (BCSP) | 0.302    | 0.328    | 0.356     | --        |
-
-### Generalization Test
-
-This test compares the performance of the strongest method on average across runs 1-5 of the 1, 4, 16, and 64 team setting with 72 teams that none of them had training exposure to.
-
-| # teams   | 1 (BCSP) | 4 (BCSP) | 16 (BCDO) | 64 (BCSP) |
-|-----------|----------|----------|-----------|-----------|
-| 1 (BCSP)  | --       | 0.405    | 0.375     | 0.331     |
-| 4 (BCSP)  | 0.595    | --       | 0.453     | 0.422     |
-| 16 (BCDO) | 0.625    | 0.547    | --        | 0.436     |
-| 64 (BCSP) | 0.669    | 0.578    | 0.564     | --        |
-
-See our paper for further results and details.
-
-# 📜 Cite us
+Forked from and built on top of **VGC-Bench** by Cameron Angliss, Jiaxun Cui, Jiaheng Hu,
+Arrasy Rahman, and Peter Stone (AAMAS 2025). Everything except the Team Builder is their work.
 
 ```bibtex
 @inproceedings{anglissvgc,
