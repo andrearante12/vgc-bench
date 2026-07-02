@@ -8,7 +8,23 @@
       "Bash(python *)",
       "WebFetch(domain:arxiv.org)",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\andre\\\\PokemonVGC\" -Recurse -Filter \"results\" -Directory -ErrorAction SilentlyContinue)",
-      "Bash(Select-Object -ExpandProperty FullName)"
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(set -e)",
+      "Bash(git stash *)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(ffmpeg -y -v error -i vgc_demo.webm -vf \"setpts=PTS/2,fps=10,scale=520:-1:flags=lanczos,palettegen=max_colors=128:stats_mode=diff\" palette.png)",
+      "Bash(ffmpeg -y -v error -i vgc_demo.webm -i palette.png -lavfi \"setpts=PTS/2,fps=10,scale=520:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3\" demo_v1.gif)",
+      "Bash(awk '{print \"v1 \\(2x,10fps,520px,128c\\): \"$5}')",
+      "Bash(ffmpeg -y -v error -i demo_v1.gif -vf \"select=eq\\(n\\\\,120\\)\" -vframes 1 frame_check.png)",
+      "Bash(awk '{print $5}')",
+      "Skill(run)",
+      "Bash(chromium-cli --help)",
+      "Bash(google-chrome --headless=new --disable-gpu --no-sandbox --remote-debugging-port=9333 --window-size=1600,2400)",
+      "Bash(disown)",
+      "Bash(curl -s http://localhost:9333/json/version)"
     ]
   }
 }

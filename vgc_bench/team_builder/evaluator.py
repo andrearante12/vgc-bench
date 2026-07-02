@@ -86,7 +86,7 @@ class TeamEvaluator:
             log_level: Logging verbosity (default WARNING to suppress noise).
             max_concurrent: Maximum concurrent battles per player.
             reg: VGC regulation identifier used to look up the battle format
-                (default "i" for gen9vgc2025regi).
+                (default "i" for gen9vgc2026regi).
         """
         self.n_battles = n_battles
         self.port = port

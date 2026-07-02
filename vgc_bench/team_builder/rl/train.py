@@ -23,7 +23,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -34,7 +36,13 @@ from vgc_bench.team_builder.psro import _nash_weights
 from vgc_bench.team_builder.rl.bc_init import apply_bc_biases
 from vgc_bench.team_builder.rl.team_builder_env import TeamBuilderBattleEnv
 from vgc_bench.team_builder.rl.team_builder_network import TeamBuilderNetwork
+from vgc_bench.team_builder.run_log import write_live_status, write_run_meta
 from vgc_bench.team_builder.team import CandidateTeam, team_to_dict, team_from_dict
+
+if TYPE_CHECKING:
+    from typing import Callable
+
+_PHASE_DIR_RE = re.compile(r"^(beta|nu)_iter(\d+)$")
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +101,6 @@ def train_policy(
         (network, best_team) — trained network and the highest-scoring team
         found during training.
     """
-    from typing import Callable  # noqa: F401 — used in type annotation above
-
     network = TeamBuilderNetwork(space).to(device)
     apply_bc_biases(network, space)
     if policy_checkpoint:
@@ -125,11 +131,24 @@ def train_policy(
 
     _snap_dir: Path | None = None
     _metrics_f = None
+    _live_run_root: Path | None = None
+    _live_phase = "train"
+    _live_iteration = 0
     if snapshot_dir is not None:
         _snap_dir = Path(snapshot_dir)
         _snap_dir.mkdir(parents=True, exist_ok=True)
         (_snap_dir / "snapshots").mkdir(exist_ok=True)
         _metrics_f = (_snap_dir / "metrics.jsonl").open("w", encoding="utf-8")
+        # Phase dirs are named beta_iter{NNN}/nu_iter{NNN} by run_sp_psro; derive the
+        # run root + phase/iteration from the dir name so live_status.json lands at
+        # the run root (one file per run, not per phase).
+        _m = _PHASE_DIR_RE.match(_snap_dir.name)
+        if _m:
+            _live_run_root = _snap_dir.parent
+            _live_phase = _m.group(1)
+            _live_iteration = int(_m.group(2))
+        else:
+            _live_run_root = _snap_dir
     _recent_species: list[list[str]] = []
 
     # Set up evaluation: either real battles or the injected eval_fn
@@ -197,6 +216,22 @@ def train_policy(
         if win_rate > best_win_rate:
             best_win_rate = win_rate
             best_team = team.with_win_rate(win_rate)
+
+        if _live_run_root is not None:
+            recent = sum(win_rate_window[-log_every:]) / min(log_every, len(win_rate_window))
+            write_live_status(
+                _live_run_root,
+                phase=_live_phase,
+                unit="step",
+                iteration=_live_iteration,
+                step=step + 1,
+                total=n_steps,
+                current_win_rate=round(win_rate, 4),
+                recent_win_rate=round(recent, 4),
+                best_win_rate=round(best_win_rate, 4),
+                current_team_showdown=team.to_showdown_text(),
+                best_team_showdown=best_team.to_showdown_text() if best_team else None,
+            )
 
         if (step + 1) % log_every == 0:
             recent = sum(win_rate_window[-log_every:]) / min(log_every, len(win_rate_window))
@@ -324,10 +359,12 @@ def run_sp_psro(
     policy_checkpoint: str | None = None,
     output_dir: Path = Path("results/rl_psro"),
     quality_threshold: float = 0.5,
+    log_every: int = 100,
     snapshot_every: int = 500,
     resume: bool = True,
     battle_agent_path: Path | None = None,
     device: str = "cpu",
+    eval_fn: "Callable[[CandidateTeam, str], float] | None" = None,
 ) -> list[CandidateTeam]:
     """
     Run SP-PSRO starting from meta teams.
@@ -343,11 +380,29 @@ def run_sp_psro(
                            against the current population to be added. Teams below this
                            threshold are discarded rather than polluting the payoff matrix.
                            Set to 0.0 to disable the gate.
+        eval_fn:           Optional callable (team, opponent_text) → win_rate in [0, 1],
+                           replacing live Showdown battles for every evaluation in the
+                           loop (training, population extension). Useful for tests and
+                           serverless smoke runs. Disables end-of-run replay saving,
+                           since replays require a live battle backend.
 
     Returns:
         All generated teams (not the meta teams) sorted by final Nash weight.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    write_run_meta(
+        output_dir,
+        run_type="sp_psro",
+        reg=reg,
+        target_iterations=n_iterations,
+        n_steps=n_steps,
+        n_battles=n_battles,
+        log_every=log_every,
+        snapshot_every=snapshot_every,
+        battle_agent_path=str(battle_agent_path) if battle_agent_path else None,
+        device=device,
+        n_meta_teams=len(meta_team_paths),
+    )
 
     _ckpt_path = output_dir / "psro_checkpoint.json"
     completed_iterations = 0
@@ -404,10 +459,12 @@ def run_sp_psro(
                 reg=reg,
                 policy_checkpoint=policy_checkpoint,
                 snapshot_dir=_beta_snap,
+                log_every=log_every,
                 snapshot_every=snapshot_every,
                 resume_checkpoint=_beta_snap / "policy.pt",
                 battle_agent_path=battle_agent_path,
                 device=device,
+                eval_fn=eval_fn,
             )
         logger.info("β best team win_rate=%.3f", beta_team.win_rate or 0.0)
 
@@ -432,9 +489,11 @@ def run_sp_psro(
             reg=reg,
             policy_checkpoint=policy_checkpoint,
             snapshot_dir=output_dir / f"nu_iter{iteration:03d}",
+            log_every=log_every,
             snapshot_every=snapshot_every,
             battle_agent_path=battle_agent_path,
             device=device,
+            eval_fn=eval_fn,
         )
         logger.info("ν best team win_rate=%.3f", nu_team.win_rate or 0.0)
 
@@ -443,7 +502,7 @@ def run_sp_psro(
             new_text = new_team.to_showdown_text()
             new_col = _eval_vs_population(
                 new_team, population_texts, port, n_battles, reg,
-                battle_agent_path=battle_agent_path, device=device,
+                battle_agent_path=battle_agent_path, device=device, eval_fn=eval_fn,
             )
 
             # Quality gate: Nash-weighted win rate must clear the threshold.
@@ -493,14 +552,17 @@ def run_sp_psro(
     for t, w in ranked:
         logger.info("  nash_weight=%.4f  win_rate=%.3f", w, t.win_rate or 0.0)
 
-    # Save one replay per original meta team for the best team
-    if ranked:
+    # Save one replay per original meta team for the best team. Skipped under eval_fn —
+    # replays are recordings of live Showdown battles, which eval_fn has no backend for.
+    if ranked and eval_fn is None:
         best_team = ranked[0][0]
         meta_texts = [Path(p).read_text(encoding="utf-8") for p in meta_team_paths]
         _save_best_team_replays(
             best_team, meta_texts, output_dir, port, n_battles=1, reg=reg,
             battle_agent_path=battle_agent_path, device=device,
         )
+    elif ranked:
+        logger.info("Skipping replay saves — eval_fn set (no live battle backend).")
 
     return [t for t, _ in ranked]
 
@@ -552,8 +614,17 @@ def _eval_vs_population(
     reg: str,
     battle_agent_path: Path | None = None,
     device: str = "cpu",
+    eval_fn: "Callable[[CandidateTeam, str], float] | None" = None,
 ) -> list[float]:
-    """Return win rates of team vs each member of the current population."""
+    """
+    Return win rates of team vs each member of the current population.
+
+    When eval_fn is provided it replaces live Showdown battles entirely (used for
+    tests and serverless runs), same as train_policy's eval_fn hook.
+    """
+    if eval_fn is not None:
+        return [eval_fn(team, opp_text) for opp_text in population_texts]
+
     from vgc_bench.team_builder.evaluator import TeamEvaluator
     win_rates = []
     for opp_text in population_texts:
@@ -620,6 +691,11 @@ def main() -> None:
         help="Min Nash-weighted win rate for a generated team to be added to the population (default 0.5).",
     )
     parser.add_argument(
+        "--log-every", type=int, default=100,
+        help="Write a metrics.jsonl line every N training steps (default 100). "
+             "Lower this for a more responsive live dashboard view.",
+    )
+    parser.add_argument(
         "--snapshot-every", type=int, default=500,
         help="Save a team snapshot every N training steps (default 500).",
     )
@@ -655,6 +731,7 @@ def main() -> None:
             policy_checkpoint=args.policy_checkpoint,
             output_dir=Path(args.output),
             quality_threshold=args.quality_threshold,
+            log_every=args.log_every,
             snapshot_every=args.snapshot_every,
             resume=not args.no_resume,
             battle_agent_path=Path(args.battle_agent_path) if args.battle_agent_path else None,

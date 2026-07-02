@@ -215,6 +215,14 @@ class TeamBuilderNetwork(nn.Module):
         self._mega_capable_sp_idxs: frozenset[int] = frozenset(
             i for i, sp in enumerate(self.species_list) if self._species_mega_idxs.get(sp)
         )
+        # Restricted-legendary indices and per-team cap (e.g. "Limit Two
+        # Restricted" in Reg I). Used to mask species sampling once the cap is hit
+        # so generated teams aren't rejected by Showdown.
+        self._restricted_sp_idxs: frozenset[int] = frozenset(
+            i for i, sp in enumerate(self.species_list)
+            if sp in self.space.restricted_species
+        )
+        self._restricted_limit: int = self.space.restricted_limit
 
         # Load GenData once for static type/stat lookups and Species Clause grouping
         from poke_env.data import GenData
@@ -343,28 +351,31 @@ class TeamBuilderNetwork(nn.Module):
         nature: str,
     ) -> torch.Tensor:
         """Encode one Pokémon to a 291-dim token tensor."""
+        device = self.species_embed.weight.device
         sp_idx = self.species_to_idx.get(species, 0)
-        sp_emb = self.species_embed(torch.tensor(sp_idx))
+        sp_emb = self.species_embed(torch.tensor(sp_idx, device=device))
 
         move_embs = []
         for m in (moves + ["Protect"] * 4)[:4]:
             mid = _to_id(m)
             m_idx = self.move_to_idx.get(mid, 0)
-            move_embs.append(self.move_embed(torch.tensor(m_idx)))
+            move_embs.append(self.move_embed(torch.tensor(m_idx, device=device)))
         move_emb = torch.cat(move_embs)
 
         i_idx = self.item_to_idx.get(_to_id(item), 0)
-        item_emb = self.item_embed(torch.tensor(i_idx))
+        item_emb = self.item_embed(torch.tensor(i_idx, device=device))
 
         a_idx = self.ability_to_idx.get(_to_id(ability), 0)
-        ab_emb = self.ability_embed(torch.tensor(a_idx))
+        ab_emb = self.ability_embed(torch.tensor(a_idx, device=device))
 
-        static = self._static_features(species)
+        static = self._static_features(species).to(device)
 
-        evs_t = torch.tensor([ev / 32.0 for ev in evs], dtype=torch.float32)
+        evs_t = torch.tensor([ev / 32.0 for ev in evs], dtype=torch.float32, device=device)
 
         n_idx = self.natures.index(nature) if nature in self.natures else 0
-        nature_oh = F.one_hot(torch.tensor(n_idx), num_classes=self.n_natures).float()
+        nature_oh = F.one_hot(
+            torch.tensor(n_idx, device=device), num_classes=self.n_natures
+        ).float()
 
         return torch.cat([sp_emb, move_emb, item_emb, ab_emb, static, evs_t, nature_oh])
 
@@ -403,7 +414,7 @@ class TeamBuilderNetwork(nn.Module):
             self.encode_team(self._encode_team_tokens(_parse_showdown_team(t)))
             for t in team_texts
         ])  # [K, D_MODEL]
-        w = torch.tensor(weights, dtype=torch.float32)
+        w = torch.tensor(weights, dtype=torch.float32, device=contexts.device)
         w = w / w.sum()
         return (contexts * w.unsqueeze(-1)).sum(dim=0)  # [D_MODEL]
 
@@ -449,12 +460,24 @@ class TeamBuilderNetwork(nn.Module):
 
         mega_sp_chosen = False
         used_sp_idxs: set[int] = set()
+        restricted_count = 0
         for slot_i in range(TEAM_SIZE):
             logits = self.species_head(running_ctx)  # [n_species]
             for idx in used_sp_idxs:
                 logits[idx] = -1e9
+            # Enforce the restricted-legendary cap (e.g. Limit Two Restricted):
+            # once the cap is hit, mask out all remaining restricted species so
+            # Showdown doesn't reject the team.
+            if self._restricted_limit > 0 and restricted_count >= self._restricted_limit:
+                for i in self._restricted_sp_idxs:
+                    logits[i] = -1e9
             # Force a mega-capable species on the last slot if none chosen yet
-            if not mega_sp_chosen and slot_i == TEAM_SIZE - 1:
+            # (only relevant in regulations that actually have Mega Evolutions).
+            if (
+                not mega_sp_chosen
+                and slot_i == TEAM_SIZE - 1
+                and self._mega_capable_sp_idxs
+            ):
                 for i in range(self.n_species):
                     if i not in self._mega_capable_sp_idxs:
                         logits[i] = -1e9
@@ -468,14 +491,17 @@ class TeamBuilderNetwork(nn.Module):
             used_sp_idxs.update(self._clause_blocked_by.get(idx.item(), frozenset()))
             if idx.item() in self._mega_capable_sp_idxs:
                 mega_sp_chosen = True
+            if idx.item() in self._restricted_sp_idxs:
+                restricted_count += 1
             running_ctx = running_ctx + self.chosen_species_proj(
                 self.species_embed(idx)
             )
 
         # ---- Phase 2: builds ----
+        device = self.species_embed.weight.device
         slot_tokens = torch.stack([
             self.slot_proj(
-                self.species_embed(torch.tensor(self.species_to_idx[sp]))
+                self.species_embed(torch.tensor(self.species_to_idx[sp], device=device))
             ) + pop_ctx
             for sp in chosen_species
         ]).unsqueeze(0)  # [1, 6, D_MODEL]
@@ -501,7 +527,7 @@ class TeamBuilderNetwork(nn.Module):
                 if mega_options:
                     allowed_items = mega_options
 
-            mask = torch.ones(self.n_items, dtype=torch.bool)
+            mask = torch.ones(self.n_items, dtype=torch.bool, device=item_logits.device)
             for i in allowed_items:
                 mask[i] = False
             item_logits[mask] = -1e9
@@ -523,7 +549,7 @@ class TeamBuilderNetwork(nn.Module):
                 allowed = valid_move_idxs - chosen_move_idxs
                 if not allowed:
                     allowed = valid_move_idxs
-                move_mask = torch.ones(self.n_moves, dtype=torch.bool)
+                move_mask = torch.ones(self.n_moves, dtype=torch.bool, device=move_logits.device)
                 for i in allowed:
                     move_mask[i] = False
                 move_logits[move_mask] = -1e9
@@ -581,12 +607,21 @@ class TeamBuilderNetwork(nn.Module):
             running_ctx = pop_ctx.clone()
             mega_sp_chosen = False
             used_sp_idxs: set[int] = set()
+            restricted_count = 0
 
             for slot_i in range(TEAM_SIZE):
                 logits = self.species_head(running_ctx)
                 for idx in used_sp_idxs:
                     logits[idx] = -1e9
-                if not mega_sp_chosen and slot_i == TEAM_SIZE - 1:
+                # Enforce the restricted-legendary cap (e.g. Limit Two Restricted).
+                if self._restricted_limit > 0 and restricted_count >= self._restricted_limit:
+                    for i in self._restricted_sp_idxs:
+                        logits[i] = -1e9
+                if (
+                    not mega_sp_chosen
+                    and slot_i == TEAM_SIZE - 1
+                    and self._mega_capable_sp_idxs
+                ):
                     for i in range(self.n_species):
                         if i not in self._mega_capable_sp_idxs:
                             logits[i] = -1e9
@@ -598,13 +633,16 @@ class TeamBuilderNetwork(nn.Module):
                 used_sp_idxs.update(self._clause_blocked_by.get(idx.item(), frozenset()))
                 if idx.item() in self._mega_capable_sp_idxs:
                     mega_sp_chosen = True
+                if idx.item() in self._restricted_sp_idxs:
+                    restricted_count += 1
                 running_ctx = running_ctx + self.chosen_species_proj(
                     self.species_embed(idx)
                 )
 
+            device = self.species_embed.weight.device
             slot_tokens = torch.stack([
                 self.slot_proj(
-                    self.species_embed(torch.tensor(self.species_to_idx[sp]))
+                    self.species_embed(torch.tensor(self.species_to_idx[sp], device=device))
                 ) + pop_ctx
                 for sp in chosen_species
             ]).unsqueeze(0)
@@ -626,7 +664,7 @@ class TeamBuilderNetwork(nn.Module):
                     if mega_options:
                         allowed = mega_options
 
-                mask = torch.ones(self.n_items, dtype=torch.bool)
+                mask = torch.ones(self.n_items, dtype=torch.bool, device=item_logits.device)
                 for i in allowed:
                     mask[i] = False
                 item_logits[mask] = -1e9
@@ -643,7 +681,7 @@ class TeamBuilderNetwork(nn.Module):
                 for head in self.move_heads:
                     move_logits = head(ctx).clone()
                     allowed_m = valid_move_idxs - chosen_move_idxs or valid_move_idxs
-                    move_mask = torch.ones(self.n_moves, dtype=torch.bool)
+                    move_mask = torch.ones(self.n_moves, dtype=torch.bool, device=move_logits.device)
                     for i in allowed_m:
                         move_mask[i] = False
                     move_logits[move_mask] = -1e9
@@ -694,6 +732,14 @@ class TeamBuilderNetwork(nn.Module):
         mega_capable = {
             sp for sp in self.species_list if self._species_mega_idxs.get(sp)
         }
+
+        # No Mega Evolutions in this regulation (e.g. every Gen 9 VGC format):
+        # the autoregressive generation only hit a clause edge case, so fall
+        # back to a plain clause-valid random team instead of the mega-only
+        # retry loop below (which would never return and then crash on an
+        # empty mega_capable set).
+        if not mega_capable:
+            return random_team(self.space)
 
         # Build a reverse lookup: species name → clause group key (for filtering)
         clause_group_of: dict[str, str] = {}

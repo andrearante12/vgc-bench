@@ -10,11 +10,13 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from vgc_bench.team_builder.build_space import BuildSpace
 from vgc_bench.team_builder.evaluator import TeamEvaluator
+from vgc_bench.team_builder.run_log import write_live_status
 from vgc_bench.team_builder.team import (
     TEAM_SIZE,
     CandidateTeam,
@@ -25,6 +27,8 @@ from vgc_bench.team_builder.team import (
 )
 
 logger = logging.getLogger(__name__)
+
+_SEARCH_ITER_DIR_RE = re.compile(r"^search_iter(\d+)$")
 
 
 @dataclass
@@ -210,7 +214,7 @@ def _run_search(
         misses,
     )
     if snapshot_dir is not None:
-        _write_round_snapshot(elites[0], record, elites, snapshot_dir)
+        _write_round_snapshot(elites[0], record, elites, snapshot_dir, config.rounds)
 
     try:
         for r in range(1, config.rounds + 1):
@@ -250,7 +254,7 @@ def _run_search(
                 misses,
             )
             if snapshot_dir is not None:
-                _write_round_snapshot(elites[0], record, elites, snapshot_dir)
+                _write_round_snapshot(elites[0], record, elites, snapshot_dir, config.rounds)
     except KeyboardInterrupt:
         logger.warning(
             "_run_search interrupted at round %d/%d — returning partial best (win_rate=%.3f).",
@@ -320,6 +324,7 @@ def _write_round_snapshot(
     record: RoundRecord,
     elites: list[CandidateTeam],
     snapshot_dir: Path,
+    rounds_total: int,
 ) -> None:
     snap = snapshot_dir / f"round_{record.round:03d}.txt"
     snap.write_text(
@@ -341,6 +346,26 @@ def _write_round_snapshot(
         "cache_misses": record.cache_misses,
         "elite_top_species": top_species,
     }
+
+    # live_status.json lands at the run root, not the per-iteration search_iter dir —
+    # derive both from the dir name (a standalone best_response call passes the run
+    # root directly, since there is no PSRO iteration to nest under).
+    dir_match = _SEARCH_ITER_DIR_RE.match(snapshot_dir.name)
+    run_root = snapshot_dir.parent if dir_match else snapshot_dir
+    iteration = int(dir_match.group(1)) if dir_match else 0
+    write_live_status(
+        run_root,
+        phase="search",
+        unit="round",
+        iteration=iteration,
+        step=record.round,
+        total=rounds_total,
+        current_win_rate=round(record.best_win_rate, 4),
+        recent_win_rate=round(record.mean_win_rate, 4),
+        best_win_rate=round(record.best_win_rate, 4),
+        current_team_showdown=best.to_showdown_text(),
+        best_team_showdown=best.to_showdown_text(),
+    )
     with (snapshot_dir / "rounds.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
 

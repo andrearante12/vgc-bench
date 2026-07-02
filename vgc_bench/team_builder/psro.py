@@ -19,6 +19,7 @@ from nashpy import Game
 from vgc_bench.team_builder.build_space import BuildSpace
 from vgc_bench.team_builder.evaluator import TeamEvaluator
 from vgc_bench.team_builder.optimizer import RoundRecord, SearchConfig, best_response_vs_mixture
+from vgc_bench.team_builder.run_log import write_run_meta
 from vgc_bench.team_builder.team import CandidateTeam, team_to_dict, team_from_dict
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,22 @@ def run_psro(
         space = BuildSpace.from_regulation(config.reg)
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
+    write_run_meta(
+        config.output_dir,
+        run_type="psro",
+        reg=config.reg,
+        target_iterations=config.n_iterations,
+        rounds_per_iteration=config.search_config.rounds,
+        population=config.search_config.population,
+        candidates=config.search_config.candidates,
+        n_battles=config.search_config.n_battles,
+        battle_agent_path=(
+            str(config.search_config.battle_agent_path)
+            if config.search_config.battle_agent_path else None
+        ),
+        device=config.search_config.device,
+        n_meta_teams=len(meta_teams),
+    )
 
     _ckpt_path = config.output_dir / "psro_checkpoint.json"
     completed_iterations = 0
