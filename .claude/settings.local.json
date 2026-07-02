@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:gitlab.com)",
+      "WebFetch(domain:ieeexplore.ieee.org)",
+      "WebFetch(domain:openreview.net)",
+      "Bash(python *)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\andre\\\\PokemonVGC\" -Recurse -Filter \"results\" -Directory -ErrorAction SilentlyContinue)",
+      "Bash(Select-Object -ExpandProperty FullName)"
+    ]
+  }
+}
