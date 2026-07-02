@@ -17,12 +17,12 @@ Both modes enforce real VGC rules (Species / Item Clause, Limit Two Restricted) 
 
 ## Demo
 
-<video src="vgc_demo.webm" autoplay loop muted playsinline controls width="100%">
+<video src="https://github.com/andrearante12/vgc-bench/raw/main/vgc_demo.webm" autoplay loop muted playsinline controls width="100%">
   Your browser does not support embedded video —
-  <a href="vgc_demo.webm">download the demo (vgc_demo.webm)</a>.
+  <a href="https://github.com/andrearante12/vgc-bench/raw/main/vgc_demo.webm">download the demo</a>.
 </video>
 
-> The Team Builder generating and evaluating a Reg I team end-to-end. If the video does not autoplay in your viewer, [open <code>vgc_demo.webm</code> directly](vgc_demo.webm).
+> The Team Builder generating and evaluating a Reg I team end-to-end. ([direct link](https://github.com/andrearante12/vgc-bench/raw/main/vgc_demo.webm))
 
 ## Quick start
 
